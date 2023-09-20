@@ -76,6 +76,7 @@ class _BaseQuery:
         :param sql: sql statement to execute
         """
         self.sql = sql
+        self.original_sql = sql
 
     @abstractmethod
     def execute_sql(self, cnx, cur, *args, **kwargs):
@@ -95,6 +96,7 @@ class _BaseQuery:
 
         @functools.wraps(func)
         def wrapped(*args, **kwargs):
+            self.sql = self.original_sql
             return self.execute_in_wrapper(*args, **kwargs)
 
         return wrapped
@@ -264,10 +266,8 @@ class Select(_BaseQuery):
         self.dictionary = dictionary
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
-        tmp_sql = self.sql   # because self.sql will be changed, so store it
         values = self.parse_search_and_update_sql_params(*args, **kwargs)
         cur.execute(self.sql, values)
-        self.sql = tmp_sql
         tuple_row = cur.fetchone()
         if self.dictionary:
             return _convert_tuple_row_to_dict(cur.column_names, tuple_row)
@@ -281,10 +281,8 @@ class SelectMany(Select):
     """
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
-        tmp_sql = self.sql  # because self.sql will be changed, so store it
         values = self.parse_search_and_update_sql_params(*args, **kwargs)
         cur.execute(self.sql, values)
-        self.sql = tmp_sql
         tuple_rows = cur.fetchall()
         if self.dictionary:
             return [_convert_tuple_row_to_dict(cur.column_names, row) for row in tuple_rows]
@@ -305,10 +303,8 @@ class Update(_BaseQuery):
     """
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
-        tmp_sql = self.sql  # because self.sql will be changed, so store it
         values = self.parse_search_and_update_sql_params(*args, **kwargs)
         cur.execute(self.sql, values)
-        self.sql = tmp_sql
         return cur.rowcount
 
 
@@ -318,8 +314,6 @@ class Delete(_BaseQuery):
     """
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
-        tmp_sql = self.sql  # because self.sql will be changed, so store it
         values = self.parse_search_and_update_sql_params(*args, **kwargs)
         cur.execute(self.sql, values)
-        self.sql = tmp_sql
         return cur.rowcount
