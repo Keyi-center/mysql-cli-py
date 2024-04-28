@@ -105,9 +105,17 @@ class _BaseQuery:
             # use shared thread local connection
             return self.execute_sql(tx_cnx, tx_cur, *args, **kwargs)
         else:
-            with mysql_cli.get_connection() as cnx:
-                with cnx.cursor(prepared=True) as cur:
-                    return self.execute_sql(cnx, cur, *args, **kwargs)
+            cnx = None
+            cur = None
+            try:
+                cnx = mysql_cli.get_connection()
+                cur = cnx.cursor(prepared=True)
+                return self.execute_sql(cnx, cur, *args, **kwargs)
+            finally:
+                if cur is not None:
+                    cur.close()
+                if cnx is not None:
+                    cnx.close()
 
     def parse_sql_params(self, *args, **kwargs):
         """Convert func param to sql param.
@@ -133,25 +141,26 @@ class _BaseQuery:
             values = make_tuple(args)
         return values
 
-    def parse_search_and_update_sql_params(self, *args, **kwargs):
+    def parse_search_and_update_sql_params(self, raw_sql, *args, **kwargs):
         """ support use ":word" or ? as a placeholder, but when the use of ":word" placeholder does not allow to use "?" as a placeholder
 
         1. check which type of placeholder be used
         2. if using "?" as a placeholder, expand the amount of "?" based on the length of each parameter
         3. if using ":word" as a placeholder, replace ":word" with a "?", expand the amout of "?" according to
            the number of values for "word" in the input parameter
+        :param raw_sql: raw sql
         :param args: function call args
         :param kwargs: function call kwargs
         :return: params tuple
         """
 
-        def handle_sql_values_by_question_placeholders(params):  # 处理问号占位符
+        def handle_sql_values_by_question_placeholders(params, original_sql):  # 处理问号占位符
             values = []
             new_sql = ''
-            placeholder_count = self.sql.count('?')
-            tmp = self.sql.split('?')
+            placeholder_count = original_sql.count('?')
+            tmp = original_sql.split('?')
             if len(params) != placeholder_count or placeholder_count == 0:
-                return ()  # TODO 现在只是返回空内容，后续优化，加入报错
+                return {'sql': original_sql, 'params': ()}  # TODO 现在只是返回空内容，后续优化，加入报错
             # 修改sql语句将每个占位符?按实参的个数扩展，并将实参拼成一个tuple
             for i in range(placeholder_count):
                 new_sql += tmp[i]
@@ -165,14 +174,13 @@ class _BaseQuery:
                     values.append(params[i])
                     new_sql += '?'
             new_sql += tmp[placeholder_count]
-            self.sql = new_sql
-            return tuple(values)
 
+            return {'sql': new_sql, 'params': tuple(values)}
 
-        def handle_sql_values_by_word_placeholders(params, placeholders):  # 处理问号占位符
+        def handle_sql_values_by_word_placeholders(params, placeholders, original_sql):  # 处理问号占位符
             values = []
             if len(params) != len(placeholders):  # 简单匹配下参数个数对不对
-                return ()  # 参数个数匹配不上就直接返回，TODO 加上报错
+                return {'sql': original_sql, 'params': ()}  # 参数个数匹配不上就直接返回，TODO 加上报错
             replace_ph = []
             for tmp in placeholders:
                 ph = tmp[1:]
@@ -198,29 +206,31 @@ class _BaseQuery:
                             replace_ph.append('?')
                             values.append(params[ph])
                 else:
-                    return ()  # 有一个参数匹配不上就直接返回，TODO 加上报错
+                    return {'sql': original_sql, 'params': ()}  # 有一个参数匹配不上就直接返回，TODO 加上报错
             values = tuple(values)
+            new_sql = original_sql
             for i in range(len(placeholders)):
-                self.sql = self.sql.replace(placeholders[i], replace_ph[i])
-            return values
+                new_sql = original_sql.replace(placeholders[i], replace_ph[i])
+            # self.sql = new_sql
+            return {'sql': new_sql, 'params': values}
 
         return_params = self.func(*args, **kwargs)
-        placeholders_list = re.findall(r':\w+', self.sql)  # 统计sql语句的占位符
+        placeholders_list = re.findall(r':\w+', raw_sql)  # 统计sql语句的占位符
 
         if len(placeholders_list) == 0:  # 使用问号做占位符
             if return_params is None:
                 return_params = args
             if not isinstance(return_params, tuple):
                 return_params = return_params,  # 如果不是元组，则转化成元组
-            return handle_sql_values_by_question_placeholders(return_params)
+            return handle_sql_values_by_question_placeholders(return_params, raw_sql)
         else:  # 使用":+word"的形式作为占位符
-            if '?' in self.sql:
+            if '?' in raw_sql:
                 raise ValueError('the use of ":word" placeholder does not allow to use "?" as a placeholder')
             if return_params is None:
                 return_params = kwargs['params']
             if not isinstance(return_params, dict):
-                return ()  # TODO 直接返回，后续可以加上报错
-            return handle_sql_values_by_word_placeholders(return_params, placeholders_list)
+                return {'sql': raw_sql, 'params': ()}  # TODO 直接返回，后续可以加上报错
+            return handle_sql_values_by_word_placeholders(return_params, placeholders_list, raw_sql)
 
 
 class Insert(_BaseQuery):
@@ -264,9 +274,9 @@ class Select(_BaseQuery):
         self.dictionary = dictionary
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
-        tmp_sql = self.sql   # because self.sql will be changed, so store it
-        values = self.parse_search_and_update_sql_params(*args, **kwargs)
-        cur.execute(self.sql, values)
+        tmp_sql = self.sql  # because self.sql will be changed, so store it
+        kv = self.parse_search_and_update_sql_params(tmp_sql, *args, **kwargs)
+        cur.execute(kv.get("sql"), kv.get("params"))
         self.sql = tmp_sql
         tuple_row = cur.fetchone()
         if self.dictionary:
@@ -282,8 +292,8 @@ class SelectMany(Select):
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
         tmp_sql = self.sql  # because self.sql will be changed, so store it
-        values = self.parse_search_and_update_sql_params(*args, **kwargs)
-        cur.execute(self.sql, values)
+        kv = self.parse_search_and_update_sql_params(tmp_sql, *args, **kwargs)
+        cur.execute(kv.get("sql"), kv.get("params"))
         self.sql = tmp_sql
         tuple_rows = cur.fetchall()
         if self.dictionary:
@@ -306,8 +316,8 @@ class Update(_BaseQuery):
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
         tmp_sql = self.sql  # because self.sql will be changed, so store it
-        values = self.parse_search_and_update_sql_params(*args, **kwargs)
-        cur.execute(self.sql, values)
+        kv = self.parse_search_and_update_sql_params(tmp_sql, *args, **kwargs)
+        cur.execute(kv.get("sql"), kv.get("params"))
         self.sql = tmp_sql
         return cur.rowcount
 
@@ -319,7 +329,7 @@ class Delete(_BaseQuery):
 
     def execute_sql(self, cnx, cur, *args, **kwargs):
         tmp_sql = self.sql  # because self.sql will be changed, so store it
-        values = self.parse_search_and_update_sql_params(*args, **kwargs)
-        cur.execute(self.sql, values)
+        kv = self.parse_search_and_update_sql_params(tmp_sql, *args, **kwargs)
+        cur.execute(kv.get("sql"), kv.get("params"))
         self.sql = tmp_sql
         return cur.rowcount
